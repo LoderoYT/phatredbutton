@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
+  <title>Button</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { width: 100%; height: 100%; }
+    body {
+      position: fixed;
+      inset: 0;
+      overflow: hidden;
+      background: #ffffff;
+    }
+    .ball {
+      position: absolute;
+      border: none;
+      border-radius: 50%;
+      cursor: grab;
+      user-select: none;
+      touch-action: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .ball:active { cursor: grabbing; }
+
+    .ui-panel {
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      z-index: 10;
+    }
+    .ui-btn {
+      font-family: 'Courier New', Courier, monospace;
+      font-size: 13px;
+      color: #888888;
+      background: rgba(255, 255, 255, 0.55);
+      border: 1px solid rgba(150, 150, 150, 0.35);
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+      padding: 8px 14px;
+      cursor: pointer;
+      user-select: none;
+      -webkit-tap-highlight-color: transparent;
+      white-space: nowrap;
+      text-align: left;
+    }
+    .ui-btn:hover {
+      color: #555555;
+      background: rgba(255, 255, 255, 0.75);
+    }
+    .ui-btn:disabled {
+      color: #cccccc;
+      cursor: default;
+      background: rgba(255, 255, 255, 0.35);
+    }
+  </style>
+</head>
+<body>
+  <div class="ui-panel">
+    <button class="ui-btn" id="gravity-toggle">deactivate gravity</button>
+    <button class="ui-btn" id="add-ball">add a ball</button>
+    <button class="ui-btn" id="remove-ball">remove a ball</button>
+  </div>
+
+  <script>
+    const GRAVITY_STRENGTH = 0.6;
+    const BOUNCE = 0.6;
+    const FRICTION = 0.98;
+    const NO_GRAVITY_FRICTION = 0.97;
+
+    let gravityOn = true;
+    let animFrame = null;
+
+    const BALL_COLORS = [
+      { main: '#dd1111', dark: '#8b0000' }, // red (first ball)
+      { main: '#1a44dd', dark: '#0d2280' }, // blue
+      { main: '#11aa11', dark: '#006000' }, // green
+      { main: '#dd9900', dark: '#8b5e00' }, // orange
+      { main: '#aa11aa', dark: '#5e0060' }, // purple
+      { main: '#00aaaa', dark: '#006060' }, // cyan
+    ];
+
+    function getSize() {
+      return Math.min(200, Math.max(80, Math.min(window.innerWidth, window.innerHeight) * 0.22));
+    }
+    function screenW() { return window.innerWidth; }
+    function screenH() { return window.innerHeight; }
+
+    const balls = [];
+
+    function makeShadow(size, dark) {
+      const bevel = Math.round(size * 0.04);
+      const shadow = Math.round(size * 0.05);
+      return {
+        normal: `0 ${bevel}px 0 ${dark}, 0 ${shadow}px 4px rgba(0,0,0,0.3)`,
+        pressed: `0 1px 0 ${dark}, 0 2px 2px rgba(0,0,0,0.2)`
+      };
+    }
+
+    // Check if a ball is in its "idle" starting position (centered, no velocity, never moved)
+    function ballIsIdle(ball) {
+      return ball._idle === true;
+    }
+
+    function updateRemoveBtn() {
+      const removeBtn = document.getElementById('remove-ball');
+      // Can remove if there are extra balls (beyond the first), or if there are multiple balls total
+      // Always keep at least the red ball; disable if only one ball and it's idle
+      removeBtn.disabled = balls.length <= 1;
+    }
+
+    function createBall(colorIndex, isFirst) {
+      const size = getSize();
+      const color = BALL_COLORS[colorIndex % BALL_COLORS.length];
+      const shadows = makeShadow(size, color.dark);
+
+      const el = document.createElement('button');
+      el.className = 'ball';
+      el.setAttribute('aria-label', 'Ball');
+      el.style.width = size + 'px';
+      el.style.height = size + 'px';
+      el.style.background = color.main;
+      el.style.boxShadow = shadows.normal;
+      document.body.appendChild(el);
+
+      let spawnX, spawnY;
+
+      if (isFirst) {
+        // First ball always starts centered
+        spawnX = screenW() / 2 - size / 2;
+        spawnY = screenH() / 2 - size / 2;
+      } else {
+        // Find a non-overlapping spawn position
+        let attempts = 0;
+        do {
+          spawnX = Math.random() * (screenW() - size);
+          spawnY = Math.random() * (screenH() - size);
+          attempts++;
+        } while (attempts < 200 && balls.some(b => {
+          const dx = (spawnX + size/2) - (b.x + b.size/2);
+          const dy = (spawnY + size/2) - (b.y + b.size/2);
+          return Math.sqrt(dx*dx + dy*dy) < (size/2 + b.size/2 + 4);
+        }));
+      }
+
+      const ball = {
+        el,
+        color,
+        colorIndex,
+        size,
+        x: spawnX,
+        y: spawnY,
+        vx: 0,
+        vy: 0,
+        dragging: false,
+        _centering: false,
+        _idle: !!isFirst, // first ball starts idle; extra balls are immediately active
+        shadows,
+        pointerHistory: [],
+        didDrag: false,
+      };
+
+      el.style.left = ball.x + 'px';
+      el.style.top = ball.y + 'px';
+
+      attachPointer(ball);
+      balls.push(ball);
+      updateRemoveBtn();
+      return ball;
+    }
+
+    function removeBall() {
+      if (balls.length <= 1) return;
+      // Remove the most recently added ball (last in array)
+      const ball = balls.pop();
+      ball.el.remove();
+      updateRemoveBtn();
+    }
+
+    function attachPointer(ball) {
+      ball.el.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        ball.el.setPointerCapture(e.pointerId);
+        ball.dragging = true;
+        ball.didDrag = false;
+
+        const offsetX = e.clientX - ball.x;
+        const offsetY = e.clientY - ball.y;
+        ball.pointerHistory = [{ x: e.clientX, y: e.clientY, t: Date.now() }];
+        ball.el.style.boxShadow = ball.shadows.pressed;
+
+        function onMove(e) {
+          ball.didDrag = true;
+          // Any movement marks the ball as no longer idle
+          ball._idle = false;
+          ball.x = e.clientX - offsetX;
+          ball.y = e.clientY - offsetY;
+          ball.el.style.left = ball.x + 'px';
+          ball.el.style.top = ball.y + 'px';
+          ball.pointerHistory.push({ x: e.clientX, y: e.clientY, t: Date.now() });
+          if (ball.pointerHistory.length > 10) ball.pointerHistory.shift();
+        }
+
+        function onUp() {
+          ball.el.removeEventListener('pointermove', onMove);
+          ball.el.removeEventListener('pointerup', onUp);
+          ball.el.style.boxShadow = ball.shadows.normal;
+          ball.dragging = false;
+
+          if (!ball.didDrag) {
+            // Pure click
+            if (ball._idle) {
+              // First click on idle ball: drop it (start gravity)
+              ball._idle = false;
+              ball.vx = 0; ball.vy = 0;
+              // Physics loop will handle it from here
+            } else if (gravityOn) {
+              const maxY = screenH() - ball.size;
+              const atBottom = ball.y >= maxY - 2;
+              ball.vx = 0; ball.vy = 0;
+              if (atBottom) {
+                animateToCenter(ball);
+              }
+            }
+            return;
+          }
+
+          // Throw — ball is definitely no longer idle
+          ball._idle = false;
+          const now = Date.now();
+          const recent = ball.pointerHistory.filter(p => now - p.t < 80);
+          if (recent.length >= 2) {
+            const first = recent[0];
+            const last = recent[recent.length - 1];
+            const dt = (last.t - first.t) || 1;
+            ball.vx = (last.x - first.x) / dt * 16;
+            ball.vy = (last.y - first.y) / dt * 16;
+          } else {
+            ball.vx = 0; ball.vy = 0;
+          }
+        }
+
+        ball.el.addEventListener('pointermove', onMove);
+        ball.el.addEventListener('pointerup', onUp);
+      });
+    }
+
+    function animateToCenter(ball) {
+      const targetX = screenW() / 2 - ball.size / 2;
+      const targetY = screenH() / 2 - ball.size / 2;
+      const duration = 400;
+      const startX = ball.x, startY = ball.y;
+      const startTime = performance.now();
+      ball._centering = true;
+
+      function ease(t) { return t < 0.5 ? 2*t*t : -1+(4-2*t)*t; }
+
+      function step(now) {
+        const t = Math.min((now - startTime) / duration, 1);
+        const e = ease(t);
+        ball.x = startX + (targetX - startX) * e;
+        ball.y = startY + (targetY - startY) * e;
+        ball.el.style.left = ball.x + 'px';
+        ball.el.style.top = ball.y + 'px';
+        if (t < 1) {
+          requestAnimationFrame(step);
+        } else {
+          ball._centering = false;
+          ball._idle = true; // back to idle once centered
+        }
+      }
+      requestAnimationFrame(step);
+    }
+
+    function resolveBallCollisions() {
+      for (let i = 0; i < balls.length; i++) {
+        for (let j = i + 1; j < balls.length; j++) {
+          const a = balls[i];
+          const b = balls[j];
+
+          // Skip if both are idle/centering (no need to resolve static overlap)
+          if ((a._idle || a._centering) && (b._idle || b._centering)) continue;
+
+          const r = (a.size + b.size) / 2;
+          const ax = a.x + a.size / 2;
+          const ay = a.y + a.size / 2;
+          const bx = b.x + b.size / 2;
+          const by = b.y + b.size / 2;
+          const dx = bx - ax;
+          const dy = by - ay;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+
+          if (dist < r && dist > 0) {
+            const overlap = (r - dist) / 2;
+            const nx = dx / dist;
+            const ny = dy / dist;
+
+            const aMovable = !a.dragging && !a._centering && !a._idle;
+            const bMovable = !b.dragging && !b._centering && !b._idle;
+
+            if (aMovable) { a.x -= nx * overlap; a.y -= ny * overlap; }
+            if (bMovable) { b.x += nx * overlap; b.y += ny * overlap; }
+
+            const aDot = a.vx * nx + a.vy * ny;
+            const bDot = b.vx * nx + b.vy * ny;
+
+            if (aMovable) {
+              a.vx = a.vx - aDot * nx + bDot * nx;
+              a.vy = a.vy - aDot * ny + bDot * ny;
+            }
+            if (bMovable) {
+              b.vx = b.vx - bDot * nx + aDot * nx;
+              b.vy = b.vy - bDot * ny + aDot * ny;
+            }
+          }
+        }
+      }
+    }
+
+    function physicsLoop() {
+      for (const ball of balls) {
+        // Skip idle, dragging, or centering balls
+        if (ball.dragging || ball._centering || ball._idle) continue;
+
+        const maxX = screenW() - ball.size;
+        const maxY = screenH() - ball.size;
+
+        if (gravityOn) {
+          ball.vy += GRAVITY_STRENGTH;
+          ball.vx *= FRICTION;
+          ball.x += ball.vx;
+          ball.y += ball.vy;
+
+          if (ball.y >= maxY) {
+            ball.y = maxY;
+            ball.vy *= -BOUNCE;
+            ball.vx *= FRICTION;
+            if (Math.abs(ball.vy) < 1) ball.vy = 0;
+          }
+          if (ball.y <= 0) { ball.y = 0; ball.vy *= -BOUNCE; }
+          if (ball.x >= maxX) { ball.x = maxX; ball.vx *= -BOUNCE; }
+          if (ball.x <= 0) { ball.x = 0; ball.vx *= -BOUNCE; }
+        } else {
+          ball.vx *= NO_GRAVITY_FRICTION;
+          ball.vy *= NO_GRAVITY_FRICTION;
+          ball.x += ball.vx;
+          ball.y += ball.vy;
+
+          if (ball.x >= maxX) { ball.x = maxX; ball.vx *= -1; }
+          if (ball.x <= 0) { ball.x = 0; ball.vx *= -1; }
+          if (ball.y >= maxY) { ball.y = maxY; ball.vy *= -1; }
+          if (ball.y <= 0) { ball.y = 0; ball.vy *= -1; }
+
+          if (Math.abs(ball.vx) < 0.05 && Math.abs(ball.vy) < 0.05) {
+            ball.vx = 0; ball.vy = 0;
+          }
+        }
+
+        ball.el.style.left = ball.x + 'px';
+        ball.el.style.top = ball.y + 'px';
+      }
+
+      resolveBallCollisions();
+
+      // Re-apply positions after collision resolution
+      for (const ball of balls) {
+        if (!ball.dragging && !ball._centering && !ball._idle) {
+          ball.el.style.left = ball.x + 'px';
+          ball.el.style.top = ball.y + 'px';
+        }
+      }
+
+      animFrame = requestAnimationFrame(physicsLoop);
+    }
+
+    // --- UI event listeners ---
+
+    document.getElementById('gravity-toggle').addEventListener('click', () => {
+      gravityOn = !gravityOn;
+      document.getElementById('gravity-toggle').textContent =
+        gravityOn ? 'deactivate gravity' : 'activate gravity';
+    });
+
+    document.getElementById('add-ball').addEventListener('click', () => {
+      const nextColorIndex = balls.length < BALL_COLORS.length
+        ? balls.length
+        : (balls.length % (BALL_COLORS.length - 1)) + 1;
+      createBall(nextColorIndex, false);
+    });
+
+    document.getElementById('remove-ball').addEventListener('click', () => {
+      removeBall();
+    });
+
+    // Handle resize
+    window.addEventListener('resize', () => {
+      const newSize = getSize();
+      for (const ball of balls) {
+        const prevSize = ball.size;
+        ball.size = newSize;
+        ball.shadows = makeShadow(newSize, ball.color.dark);
+        ball.el.style.width = newSize + 'px';
+        ball.el.style.height = newSize + 'px';
+        ball.el.style.boxShadow = ball.shadows.normal;
+
+        const maxXOld = screenW() - prevSize;
+        const maxYOld = screenH() - prevSize;
+        const ratioX = maxXOld > 0 ? ball.x / maxXOld : 0.5;
+        const ratioY = maxYOld > 0 ? ball.y / maxYOld : 0.5;
+        ball.x = Math.max(0, Math.min(ratioX * (screenW() - newSize), screenW() - newSize));
+        ball.y = Math.max(0, Math.min(ratioY * (screenH() - newSize), screenH() - newSize));
+        ball.el.style.left = ball.x + 'px';
+        ball.el.style.top = ball.y + 'px';
+
+        // If idle ball, re-center it
+        if (ball._idle) {
+          ball.x = screenW() / 2 - newSize / 2;
+          ball.y = screenH() / 2 - newSize / 2;
+          ball.el.style.left = ball.x + 'px';
+          ball.el.style.top = ball.y + 'px';
+        }
+      }
+    });
+
+    // Create first (red) ball — starts idle in center
+    createBall(0, true);
+
+    // Start physics loop
+    animFrame = requestAnimationFrame(physicsLoop);
+  </script>
+</body>
+</html>
